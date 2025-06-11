@@ -62,28 +62,53 @@ bool handleServer(SOCKET sock)
     }
     cout << "[CLIENT] Received EXEC_STARTED\n";
 
-    if (!recvTLV(sock, msg) || msg.type != 0x06 || msg.length != 4)
+    while (true)
     {
-        cerr << "[-] Expected EXEC_RESULT" << endl;
-        return false;
+        cout << "[CLIENT] Requesting STATUS...\n";
+        sendTLV(sock, 0x06, {});
+
+        if (!recvTLV(sock, msg))
+        {
+            cerr << "[-] No response to STATUS\n";
+            return false;
+        }
+
+        if (msg.type == 0x07)
+        {
+            cout << "[CLIENT] Status: IN_PROGRESS\n";
+            this_thread::sleep_for(chrono::seconds(1));
+            continue;
+        }
+        else if (msg.type == 0x08 && msg.length == 4)
+        {
+            uint32_t timeMs = readUint32(msg.value.data());
+            cout << "[CLIENT] Execution time: " << timeMs << " ms\n";
+
+            if (!recvTLV(sock, msg) || msg.type != 0x09 || msg.length != size * size * 4)
+            {
+                cerr << "[-] Invalid matrix data" << endl;
+                return false;
+            }
+
+            cout << "[CLIENT] Received updated matrix.\n";
+            break;
+        }
+        else
+        {
+            cerr << "[-] Unexpected response to STATUS\n";
+            return false;
+        }
     }
-    uint32_t timeMs = readUint32(msg.value.data());
-    cout << "[CLIENT] Execution time: " << timeMs << " ms\n";
 
-    if (!recvTLV(sock, msg) || msg.type != 0x07 || msg.length != size * size * 4)
-    {
-        cerr << "[-] Invalid matrix data" << endl;
-        return false;
-    }
+    cout << "[CLIENT] Sending CLIENT_EXIT...\n";
+    sendTLV(sock, 0x0A, {});
 
-    cout << "[CLIENT] Sending CLIENT_EXIT..." << endl;
-    sendTLV(sock, 0x08, {});
-
-    if (!recvTLV(sock, msg) || msg.type != 0x09)
+    if (!recvTLV(sock, msg) || msg.type != 0x0B)
     {
         cerr << "[-] Expected BYE" << endl;
         return false;
     }
+
     cout << "[CLIENT] Received BYE. Closing connection.\n";
     return true;
 }

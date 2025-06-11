@@ -51,7 +51,8 @@ int runMatrixTask(int threads, std::vector<std::vector<int>> &matrix)
     for (int i = 0; i < threads; ++i)
     {
         int end = start + rowsPerThread + (i < extra ? 1 : 0);
-        workers.emplace_back([&, start, end]() {
+        workers.emplace_back([&, start, end]()
+                             {
             for (int row = start; row < end; ++row)
             {
                 int minIdx = 0;
@@ -61,25 +62,30 @@ int runMatrixTask(int threads, std::vector<std::vector<int>> &matrix)
                         minIdx = col;
                 }
                 std::swap(matrix[row][minIdx], matrix[row][size - row - 1]);
-            }
-        });
+            } });
         start = end;
     }
 
     for (auto &t : workers)
         t.join();
 
+    this_thread::sleep_for(chrono::seconds(3));
+
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::high_resolution_clock::now() - begin)
         .count();
 }
-
 
 void handleClient(SOCKET clientSocket)
 {
     try
     {
         TLV msg;
+
+        atomic<bool> taskRunning{false};
+        atomic<bool> taskDone{false};
+        vector<vector<int>> resultMatrix;
+        int execTime = -1;
 
         cout << "[SERVER] Waiting HELLO...\n";
         if (!recvTLV(clientSocket, msg) || msg.type != 0x00)
@@ -115,30 +121,61 @@ void handleClient(SOCKET clientSocket)
             for (uint32_t j = 0; j < size; ++j)
                 matrix[i][j] = readUint32(&data[4 * (i * size + j)]);
 
+        taskRunning = true;
+        taskDone = false;
+        execTime = -1;
+
+        resultMatrix = matrix;
+
+        thread worker([&resultMatrix, &execTime, &taskRunning, &taskDone, threads]()
+                      {
+                        execTime = runMatrixTask(threads, resultMatrix);
+                        taskDone.store(true);
+                        taskRunning.store(false); });
+        worker.detach();
+
         sendTLV(clientSocket, 0x05, vector<uint8_t>{0x00});
         cout << "[SERVER] Sent EXEC_STARTED\n";
 
-        int execTime = runMatrixTask(threads, matrix);
-        cout << "[SERVER] Execution finished in " << execTime << " ms\n";
+        while (true)
+        {
+            if (!recvTLV(clientSocket, msg))
+                break;
 
-        vector<uint8_t> result;
-        writeUint32(result, execTime);
-        sendTLV(clientSocket, 0x06, result);
-        cout << "[SERVER] Sent EXEC_RESULT\n";
 
-        vector<uint8_t> updated;
-        for (uint32_t i = 0; i < size; ++i)
-            for (uint32_t j = 0; j < size; ++j)
-                writeUint32(updated, matrix[i][j]);
-        sendTLV(clientSocket, 0x07, updated);
-        cout << "[SERVER] Sent updated matrix\n";
+            if (msg.type == 0x06)
+            {
+                cout << "[SERVER] Received requestion STATUS\n";
 
-        if (!recvTLV(clientSocket, msg) || msg.type != 0x08)
-            throw "Invalid matrix data";
-        cout << "[SERVER] Waiting CLIENT_EXIT...\n";
+                if (taskRunning)
+                {
+                    sendTLV(clientSocket, 0x07, vector<uint8_t>{'I', 'N', '_', 'P', 'R', 'O', 'G', 'R', 'E', 'S', 'S'});
+                    cout << "[SERVER] Sent IN_PROGRESS" << endl;
+                }
+                else if (taskDone)
+                {
+                    vector<uint8_t> result;
+                    writeUint32(result, execTime);
+                    sendTLV(clientSocket, 0x08, result);
+                    cout << "[SERVER] Sent RESULT" << endl;
 
-        sendTLV(clientSocket, 0x09, {});
-        cout << "[SERVER] Sent BYE" << endl;
+                    vector<uint8_t> updated;
+                    for (uint32_t i = 0; i < resultMatrix.size(); ++i)
+                        for (uint32_t j = 0; j < resultMatrix.size(); ++j)
+                            writeUint32(updated, resultMatrix[i][j]);
+                    sendTLV(clientSocket, 0x09, updated);
+                    cout << "[SERVER] Sent UPDATED_DATA" << endl;
+                }
+            }
+            else if (msg.type == 0x0A)
+            {
+                cout << "[SERVER] Received CLIENT_EXIT\n";
+
+                sendTLV(clientSocket, 0x0B, {});
+                cout << "[SERVER] Sent BYE" << endl;
+                break;
+            }
+        }
 
         shutdown(clientSocket, SD_BOTH);
         closesocket(clientSocket);
